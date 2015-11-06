@@ -20,9 +20,9 @@
 
 #pragma once
 
-#include "OceanPluginPrivatePCH.h"
+
 #include "BuoyantMesh/BuoyantMeshVertex.h"
-#include "BuoyantMesh/BuoyantMeshSubtriangle.h"
+struct FBuoyantMeshSubtriangle;
 
 /*
 This class calculates the buoyancy forces on a triangle.
@@ -40,12 +40,6 @@ struct FBuoyantMeshTriangle
 	static FBuoyantMeshTriangle FromClockwiseVertices(const FBuoyantMeshVertex& A,
 	                                                  const FBuoyantMeshVertex& B,
 	                                                  const FBuoyantMeshVertex& C);
-	// Creates a triangle from the ordered vertices and the normal.
-	// H is the highest vertex above water, followed by M then by L.
-	FBuoyantMeshTriangle(const FBuoyantMeshVertex& H,
-	                     const FBuoyantMeshVertex& M,
-	                     const FBuoyantMeshVertex& L,
-	                     const FVector& Normal);
 	// The triangle normal.
 	const FVector Normal;
 
@@ -63,14 +57,24 @@ struct FBuoyantMeshTriangle
 	                                                    bool bDrawWaterline = false) const;
 
    private:
+	// Find the cutting point on a triangle edge, at the determined distance from the start vertex.
+	static FVector FindCutOnEdge(const FBuoyantMeshVertex& Start,
+	                             const FBuoyantMeshVertex& End,
+	                             float const CutDistance);
+
 	static void SortVerticesByHeight(const FBuoyantMeshVertex& InA,
 	                                 const FBuoyantMeshVertex& InB,
 	                                 const FBuoyantMeshVertex& InC,
 	                                 const FBuoyantMeshVertex** OutH,
 	                                 const FBuoyantMeshVertex** OutM,
 	                                 const FBuoyantMeshVertex** OutL);
-	// Find the cutting point on a triangle edge, at the determined distance from the start vertex.
-	static FVector FindCutOnEdge(const FBuoyantMeshVertex& Start,
-	                             const FBuoyantMeshVertex& End,
-	                             float const CutDistance);
+	template <typename T>
+	static void SwapPointers(const T*& p, const T*& q);
+
+	// Creates a triangle from the ordered vertices and the normal.
+	// H is the highest vertex above water, followed by M then by L.
+	FBuoyantMeshTriangle(const FBuoyantMeshVertex& H,
+		const FBuoyantMeshVertex& M,
+		const FBuoyantMeshVertex& L,
+		const FVector& Normal);
 };

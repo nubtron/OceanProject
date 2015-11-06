@@ -6,7 +6,7 @@
 * Unreal Engine version: 4.9
 * Created on: 2015/09/21
 *
-* Last Edited on: 2015/09/21
+* Last Edited on: 2015/11/06
 * Last Edited by: quantumv
 *
 * -------------------------------------------------
@@ -19,21 +19,29 @@
 * =================================================*/
 
 #include "OceanPluginPrivatePCH.h"
+#include "BuoyantMesh/BuoyantMeshSubtriangle.h"
 #include "BuoyantMesh/BuoyantMeshTriangle.h"
 
 FBuoyantMeshTriangle FBuoyantMeshTriangle::FromClockwiseVertices(const FBuoyantMeshVertex& A,
                                                                  const FBuoyantMeshVertex& B,
                                                                  const FBuoyantMeshVertex& C)
 {
-	const auto TriangleNormal =
-	    FVector::CrossProduct(B.Position - A.Position, C.Position - A.Position).GetSafeNormal();
+	const auto TriangleNormal = FVector::CrossProduct(B.Position - A.Position, C.Position - A.Position).GetSafeNormal();
 
 	const FBuoyantMeshVertex* H;
 	const FBuoyantMeshVertex* M;
 	const FBuoyantMeshVertex* L;
-	SortVerticesByHeight(A, B, C, &H, &M, &L);
+	SortVerticesByHeight(A, B, C, /*out*/ &H, /*out*/ &M, /*out*/ &L);
 
 	return {*H, *M, *L, TriangleNormal};
+}
+
+template <typename T>
+void FBuoyantMeshTriangle::SwapPointers(const T*& p, const T*& q)
+{
+	const T* Temp = p;
+	p = q;
+	q = Temp;
 }
 
 void FBuoyantMeshTriangle::SortVerticesByHeight(const FBuoyantMeshVertex& InA,
@@ -49,25 +57,16 @@ void FBuoyantMeshTriangle::SortVerticesByHeight(const FBuoyantMeshVertex& InA,
 
 	if (L->Height > H->Height)
 	{
-		// L needs to be lower than H, so swap L and H.
-		auto Temp = L;
-		L = H;
-		H = Temp;
+		SwapPointers(L, H);
 	}
 	if (L->Height > M->Height)
 	{
-		// L needs to be lower than M, so swap L and M.
-		auto Temp = L;
-		L = M;
-		M = Temp;
+		SwapPointers(L, M);
 	}
 	// Now the L is the lowest vertex. We only need to check M and H.
 	if (M->Height > H->Height)
 	{
-		// M needs to be lower than H, so swap M and H.
-		auto Temp = M;
-		M = H;
-		H = Temp;
+		SwapPointers(M, H);
 	}
 	*OutH = H;
 	*OutM = M;
@@ -110,11 +109,11 @@ TArray<FBuoyantMeshSubtriangle> FBuoyantMeshTriangle::GetSubmergedPortion(const 
 			DrawDebugLine(World, Im, Il, FColor::Blue, false, -1.f, 0, 16.f);
 		}
 
-		TArray<FBuoyantMeshSubtriangle> CutResult;
+		TArray<FBuoyantMeshSubtriangle> CutResult{};
 		// First triangle cut
-		CutResult.Emplace(FBuoyantMeshSubtriangle{M.Position, Im, L.Position});
+		CutResult.Emplace(M.Position, Im, L.Position);
 		// Second triangle cut
-		CutResult.Emplace(FBuoyantMeshSubtriangle{Im, Il, L.Position});
+		CutResult.Emplace(Im, Il, L.Position);
 		return CutResult;
 	}
 	// Case in which two vertices are above water and one is below.
@@ -138,22 +137,24 @@ TArray<FBuoyantMeshSubtriangle> FBuoyantMeshTriangle::GetSubmergedPortion(const 
 		CutResult.Emplace(FBuoyantMeshSubtriangle{Jh, Jm, L.Position});
 		return CutResult;
 	}
+	//  All three vertices are underwater.
 	else if (H.IsUnderwater() && M.IsUnderwater() && L.IsUnderwater())
 	{
 		// Return the entire triangle.
-		TArray<FBuoyantMeshSubtriangle> CutResult;
-		CutResult.Emplace(FBuoyantMeshSubtriangle{H.Position, M.Position, L.Position});
+		TArray<FBuoyantMeshSubtriangle> CutResult{};
+		CutResult.Emplace(H.Position, M.Position, L.Position);
 		return CutResult;
 	}
+	// No part is underwater.
 	else if (!H.IsUnderwater() && !M.IsUnderwater() && !L.IsUnderwater())
 	{
-		return {}; // No part is underwater.
+		// No submerged part.
+		return {}; 
 	}
-
 	else
 	{
 		// The other cases should cover everything, we should never get to this point.
-		verify(false);
+		checkNoEntry();
 		return {};
 	}
 }

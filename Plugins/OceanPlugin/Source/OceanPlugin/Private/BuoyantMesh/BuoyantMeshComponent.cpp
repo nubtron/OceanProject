@@ -22,7 +22,6 @@
 #include "BuoyantMesh/BuoyantMeshComponent.h"
 
 #include "PhysicsEngine/BodySetup.h"
-#include "PhysXIncludes.h"
 #include "PhysXPublic.h"
 
 #include "OceanManager.h"
@@ -30,6 +29,7 @@
 #include "BuoyantMesh/BuoyantMeshSubtriangle.h"
 
 using FForce = UBuoyantMeshComponent::FForce;
+using ForceType = UBuoyantMeshComponent::ForceType;
 
 // Sets default values for this component's properties
 UBuoyantMeshComponent::UBuoyantMeshComponent()
@@ -40,7 +40,8 @@ UBuoyantMeshComponent::UBuoyantMeshComponent()
 	bAutoActivate = true;
 	bVerticalForcesOnly = false;
 	UActorComponent::SetComponentTickEnabled(true);
-
+	bUseDynamicForces = true;
+	bUseStaticForces = true;
 	WaterDensity = 0.001027f;
 }
 
@@ -116,7 +117,7 @@ void UBuoyantMeshComponent::Initialize()
 	{
 		for (auto Actor : TActorRange<AOceanManager>(GetWorld()))
 		{
-			OceanManager = Cast<AOceanManager>(Actor);
+			OceanManager = Actor;
 			break;
 		}
 	}
@@ -130,7 +131,7 @@ void UBuoyantMeshComponent::GetTriangleVertexIndices(const TArray<FVector>& Worl
                                                      int32* OutIndex2,
                                                      int32* OutIndex3)
 {
-	*OutIndex1 = VertexIndices[TriangleIndex * 3];
+	*OutIndex1 = VertexIndices[TriangleIndex * 3 + 0];
 	*OutIndex2 = VertexIndices[TriangleIndex * 3 + 1];
 	*OutIndex3 = VertexIndices[TriangleIndex * 3 + 2];
 	return;
@@ -147,65 +148,83 @@ void UBuoyantMeshComponent::GetTriangleVertexIndices(const TArray<FVector>& Worl
 	if (b16BitIndices)
 	{
 		const auto Indices = static_cast<const PxU16*>(VertexIndices);
-		GetTriangleVertexIndices(
-		    WorldVertexPositions, Indices, TriangleIndex, OutIndex1, OutIndex2, OutIndex3);
+		GetTriangleVertexIndices(WorldVertexPositions,
+		                         Indices,
+		                         TriangleIndex,
+		                         /*out*/ OutIndex1,
+		                         /*out*/ OutIndex2,
+		                         /*out*/ OutIndex3);
 		return;
 	}
 	else
 	{
 		const auto Indices = static_cast<const PxU32*>(VertexIndices);
-		GetTriangleVertexIndices(
-		    WorldVertexPositions, Indices, TriangleIndex, OutIndex1, OutIndex2, OutIndex3);
+		GetTriangleVertexIndices(WorldVertexPositions,
+		                         Indices,
+		                         TriangleIndex,
+		                         /*out*/ OutIndex1,
+		                         /*out*/ OutIndex2,
+		                         /*out*/ OutIndex3);
 		return;
 	}
 }
 
-void UBuoyantMeshComponent::GetSubtriangleForces(const UWorld& World,
-                                                 TArray<FForce>& InOutForces,
-                                                 const float GravityMagnitude,
-                                                 const FVector& TriangleNormal,
-                                                 const FBuoyantMeshSubtriangle& Subtriangle) const
+void UBuoyantMeshComponent::GetSubmergedTriangleForces(const UWorld& World,
+                                                       TArray<FForce>& InOutForces,
+                                                       const float GravityMagnitude,
+                                                       const FVector& TriangleNormal,
+                                                       const FBuoyantMeshSubtriangle& Subtriangle) const
 {
 	const auto CenterPosition = Subtriangle.GetCenter();
-	const FBuoyantMeshVertex TriangleCenter{CenterPosition,
-	                                        GetHeightAboveWater(World, CenterPosition)};
-	const auto ForceVector = Subtriangle.GetHydrostaticForce(
-	    WaterDensity, GravityMagnitude, TriangleCenter, TriangleNormal);
+	const FBuoyantMeshVertex CenterVertex{CenterPosition, GetHeightAboveWater(World, CenterPosition)};
+	const auto TriangleArea = Subtriangle.GetArea();
+	if (FMath::IsNearlyZero(TriangleArea)) return;
 
-	const FForce Force = {ForceVector, CenterPosition};
-	InOutForces.Emplace(Force);
+	if (bUseStaticForces)
+	{
+		const auto StaticForce = FBuoyantMeshSubtriangle::GetHydrostaticForce(
+		    WaterDensity, GravityMagnitude, CenterVertex, TriangleNormal, TriangleArea);
+		InOutForces.Emplace(StaticForce, CenterPosition);
+	}
+
+	if (bUseDynamicForces)
+	{
+		const auto CenterVelocity = UpdatedComponent->GetBodyInstance()->GetUnrealWorldVelocityAtPoint(CenterPosition);
+		const auto DynamicForce = FBuoyantMeshSubtriangle::GetHydrodynamicForce(
+		    WaterDensity, CenterPosition, CenterVelocity, TriangleNormal, TriangleArea);
+		InOutForces.Emplace(DynamicForce, CenterPosition);
+	}
 }
 
 void UBuoyantMeshComponent::GetTriangleMeshForces(TArray<FForce>& InOutForces,
-                                                  UWorld& InWorld,
+                                                  UWorld& World,
                                                   const PxTriangleMesh& TriangleMesh) const
 {
-	// Get Vertices
+	// Get vertices
 	const PxVec3* const Vertices = TriangleMesh.getVertices();
 	const PxU32 VertexCount = TriangleMesh.getNbVertices();
 
 	const auto LocalToWorld = GetComponentTransform();
 
-	TArray<FVector> WorldVertexPositions;
-	TArray<float> VertexHeights;
+	TArray<FVector> WorldVertexPositions{};
+	TArray<float> VertexHeights{};
 	for (PxU32 i = 0; i < VertexCount; ++i)
 	{
 		const auto Vertex = LocalToWorld.TransformPosition(P2UVector(Vertices[i]));
-		WorldVertexPositions.Emplace(Vertex);
-		VertexHeights.Emplace(GetHeightAboveWater(InWorld, Vertex));
+		WorldVertexPositions.Add(Vertex);
+		VertexHeights.Add(GetHeightAboveWater(World, Vertex));
 		if (bDrawVertices)
 		{
-			DrawDebugPoint(&InWorld, Vertex, 2.f, FColor::White);
+			DrawDebugPoint(&World, Vertex, 2.f, FColor::White);
 		}
 	}
 
-	// Get Triangles
+	// Get triangles
 	const PxU32 TriangleCount = TriangleMesh.getNbTriangles();
 	const void* const VertexIndices = TriangleMesh.getTriangles();
-	const auto b16BitIndices =
-	    TriangleMesh.getTriangleMeshFlags() & PxTriangleMeshFlag::e16_BIT_INDICES;
+	const auto b16BitIndices = TriangleMesh.getTriangleMeshFlags() & PxTriangleMeshFlag::e16_BIT_INDICES;
 
-	const float GravityMagnitude = FMath::Abs(InWorld.GetGravityZ());
+	const float GravityMagnitude = FMath::Abs(World.GetGravityZ());
 
 	for (PxU32 TriangleIndex = 0; TriangleIndex < TriangleCount; ++TriangleIndex)
 	{
@@ -219,9 +238,9 @@ void UBuoyantMeshComponent::GetTriangleMeshForces(TArray<FForce>& InOutForces,
 		                         VertexIndices,
 		                         TriangleIndex,
 		                         b16BitIndices,
-		                         &AIndex,
-		                         &BIndex,
-		                         &CIndex);
+		                         /*out*/ &AIndex,
+		                         /*out*/ &BIndex,
+		                         /*out*/ &CIndex);
 
 		const FBuoyantMeshVertex A{WorldVertexPositions[AIndex], VertexHeights[AIndex]};
 		const FBuoyantMeshVertex B{WorldVertexPositions[BIndex], VertexHeights[BIndex]};
@@ -229,23 +248,21 @@ void UBuoyantMeshComponent::GetTriangleMeshForces(TArray<FForce>& InOutForces,
 
 		if (bDrawTriangles)
 		{
-			DrawDebugTriangle(InWorld, A.Position, B.Position, C.Position, FColor::White, 4.f);
+			DrawDebugTriangle(World, A.Position, B.Position, C.Position, FColor::White, 4.f);
 		}
 
 		const auto Triangle = FBuoyantMeshTriangle::FromClockwiseVertices(A, B, C);
 
-		const auto SubTriangles = Triangle.GetSubmergedPortion(&InWorld, bDrawWaterline);
+		const auto SubTriangles = Triangle.GetSubmergedPortion(&World, bDrawWaterline);
 
 		for (const auto& SubTriangle : SubTriangles)
 		{
 			if (bDrawSubtriangles)
 			{
-				DrawDebugTriangle(
-				    InWorld, SubTriangle.A, SubTriangle.B, SubTriangle.C, FColor::Yellow, 6.f);
+				DrawDebugTriangle(World, SubTriangle.A, SubTriangle.B, SubTriangle.C, FColor::Yellow, 6.f);
 			}
 			SCOPE_CYCLE_COUNTER(STAT_GetHydrostaticForces);
-			GetSubtriangleForces(
-			    InWorld, InOutForces, GravityMagnitude, Triangle.Normal, SubTriangle);
+			GetSubmergedTriangleForces(World, /*inout*/ InOutForces, GravityMagnitude, Triangle.Normal, SubTriangle);
 		}
 	}
 }
@@ -263,38 +280,32 @@ void UBuoyantMeshComponent::DrawDebugTriangle(const UWorld& World,
 }
 
 void UBuoyantMeshComponent::GetStaticMeshForces(TArray<FForce>& InOutForces,
-                                                UWorld& InWorld,
+                                                UWorld& World,
                                                 const UBodySetup& BodySetup) const
 {
 	for (const auto TriangleMesh : BodySetup.TriMeshes)
 	{
 		if (TriangleMesh != nullptr)
 		{
-			GetTriangleMeshForces(InOutForces, InWorld, *TriangleMesh);
+			GetTriangleMeshForces(/*inout*/ InOutForces, World, *TriangleMesh);
 		}
 	}
 }
 
-void UBuoyantMeshComponent::ApplyHydrostaticForce(UWorld& World,
-                                                  UPrimitiveComponent& Component,
-                                                  const FForce& Force)
+void UBuoyantMeshComponent::ApplyMeshForce(UWorld& World, UPrimitiveComponent& Component, const FForce& Force)
 {
 	const auto ForceVector = bVerticalForcesOnly ? FVector{0.f, 0.f, Force.Vector.Z} : Force.Vector;
-	const auto bIsValidForce = !ForceVector.IsNearlyZero() && isfinite(ForceVector.X) &&
-	                           isfinite(ForceVector.Y) && isfinite(ForceVector.Z);
+	const auto bIsValidForce = !ForceVector.IsNearlyZero() && !ForceVector.ContainsNaN();
 	if (!bIsValidForce) return;
 
 	Component.AddForceAtLocation(ForceVector, Force.Point);
 	if (bDrawForceArrows)
 	{
-		DrawDebugLine(&World,
-		              Force.Point - (ForceVector * ForceArrowSize * 0.0001f),
-		              Force.Point,
-		              FColor::Blue);
+		DrawDebugLine(&World, Force.Point - (ForceVector * ForceArrowSize * 0.0001f), Force.Point, FColor::Blue);
 	}
 }
 
-void UBuoyantMeshComponent::ApplyHydrostaticForces()
+void UBuoyantMeshComponent::ApplyMeshForces()
 {
 	SCOPE_CYCLE_COUNTER(STAT_ApplyHydrostaticForces);
 	const auto World = GetWorld();
@@ -307,7 +318,7 @@ void UBuoyantMeshComponent::ApplyHydrostaticForces()
 		return;
 	}
 
-	if (!IsValid(UpdatedComponent))
+	if (!IsValid(UpdatedComponent) || !UpdatedComponent->IsSimulatingPhysics())
 	{
 		UE_LOG(LogTemp,
 		       Error,
@@ -321,7 +332,7 @@ void UBuoyantMeshComponent::ApplyHydrostaticForces()
 
 	for (const auto& Force : Forces)
 	{
-		ApplyHydrostaticForce(*World, *UpdatedComponent, Force);
+		ApplyMeshForce(*World, *UpdatedComponent, Force);
 	}
 }
 
@@ -338,5 +349,5 @@ void UBuoyantMeshComponent::TickComponent(float DeltaTime,
 		Initialize();
 	}
 
-	ApplyHydrostaticForces();
+	ApplyMeshForces();
 }

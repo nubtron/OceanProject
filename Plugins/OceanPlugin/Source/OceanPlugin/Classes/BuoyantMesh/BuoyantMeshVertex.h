@@ -20,8 +20,6 @@
 
 #pragma once
 
-#include "OceanPluginPrivatePCH.h"
-
 // Associates a position with a height above water.
 struct FBuoyantMeshVertex
 {

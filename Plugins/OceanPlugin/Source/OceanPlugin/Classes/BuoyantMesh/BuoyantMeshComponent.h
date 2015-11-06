@@ -6,7 +6,7 @@
 * Unreal Engine version: 4.9
 * Created on: 2015/09/21
 *
-* Last Edited on: 2015/09/21
+* Last Edited on: 2015/11/06
 * Last Edited by: quantumv
 *
 * -------------------------------------------------
@@ -20,27 +20,19 @@
 
 #pragma once
 
-#include "OceanPluginPrivatePCH.h"
-#include "BuoyantMesh/BuoyantMeshVertex.h"
-#include "BuoyantMesh/BuoyantMeshTriangle.h"
-#include "BuoyantMesh/BuoyantMeshSubtriangle.h"
-#include "Components/StaticMeshComponent.h"
 #include "PhysXIncludes.h"
-#include "PhysXPublic.h"
-#include "OceanManager.h"
 #include "BuoyantMeshComponent.generated.h"
+
+struct BuoyantMeshVertex;
+struct FBuoyantMeshTriangle;
+struct FBuoyantMeshSubtriangle;
+class AOceanManager;
 
 // For the UE4 Profiler
 DECLARE_STATS_GROUP(TEXT("BuoyantMeshComponent"), STATGROUP_BuoyantMeshComponent, STATCAT_Advanced);
-DECLARE_CYCLE_STAT(TEXT("GetHydrostaticForces"),
-                   STAT_GetHydrostaticForces,
-                   STATGROUP_BuoyantMeshComponent);
-DECLARE_CYCLE_STAT(TEXT("ApplyHydrostaticForces"),
-                   STAT_ApplyHydrostaticForces,
-                   STATGROUP_BuoyantMeshComponent);
-DECLARE_CYCLE_STAT(TEXT("GetHeightAboveWater"),
-                   STAT_GetHeightAboveWater,
-                   STATGROUP_BuoyantMeshComponent);
+DECLARE_CYCLE_STAT(TEXT("GetHydrostaticForces"), STAT_GetHydrostaticForces, STATGROUP_BuoyantMeshComponent);
+DECLARE_CYCLE_STAT(TEXT("ApplyMeshForces"), STAT_ApplyHydrostaticForces, STATGROUP_BuoyantMeshComponent);
+DECLARE_CYCLE_STAT(TEXT("GetHeightAboveWater"), STAT_GetHeightAboveWater, STATGROUP_BuoyantMeshComponent);
 
 /*
 
@@ -52,6 +44,8 @@ http://gamasutra.com/view/news/237528/Water_interaction_model_for_boats_in_video
 It does not implement the water heightmap or the rotation-free triangle centers in the appendix.
 
 Use simplified hull-shaped meshes to keep performance acceptable.
+
+Update 2015/11/06: Added support for dynamic (drag) forces.
 
 */
 
@@ -71,6 +65,14 @@ class OCEANPLUGIN_API UBuoyantMeshComponent : public UStaticMeshComponent
 	// Only use the vertical component of the buoyancy forces.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Buoyancy Settings")
 	bool bVerticalForcesOnly;
+
+	// Use hydrostatic (buoyancy) forces if true.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Buoyancy Settings")
+	bool bUseStaticForces;
+
+	// Use hydrodynamic (drag) forces if true.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Buoyancy Settings")
+	bool bUseDynamicForces;
 
 	// Density of the fluid in kg/uu^3. It is around 0.001027 if 1 unreal unit is 1 cm.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Buoyancy Settings")
@@ -105,7 +107,25 @@ class OCEANPLUGIN_API UBuoyantMeshComponent : public UStaticMeshComponent
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
 	float ForceArrowSize = 1.f;
 
-#pragma region UActorComponent Interface
+	enum class ForceType 
+	{
+		Dynamic,
+		Static,
+	};
+
+	struct FForce
+	{
+		FVector Vector;
+		// Application point of the force
+		FVector Point;
+		// ForceType ForceType;
+		FForce(const FVector& Vector, const FVector& Point) : Vector{Vector}, Point{Point}
+		{
+		}
+	};
+
+   protected:
+	// Begin UActorComponent Interface
 
 	virtual void TickComponent(float DeltaTime,
 	                           enum ELevelTick TickType,
@@ -113,14 +133,7 @@ class OCEANPLUGIN_API UBuoyantMeshComponent : public UStaticMeshComponent
 	virtual void InitializeComponent() override;
 	virtual void BeginPlay() override;
 
-#pragma endregion
-
-	struct FForce
-	{
-		FVector Vector;
-		// Application point of the force
-		FVector Point;
-	};
+	// End UActorComponent Interface
 
    private:
 	bool bNeedsInitialization = true;
@@ -147,28 +160,22 @@ class OCEANPLUGIN_API UBuoyantMeshComponent : public UStaticMeshComponent
 	                                     int32* OutIndex3);
 
 	// Adds the hydrostatic force pressing on a submerged triangle to an array of forces.
-	void GetSubtriangleForces(const UWorld& World,
+	void GetSubmergedTriangleForces(const UWorld& World,
 	                          TArray<FForce>& InOutForces,
 	                          const float GravityMagnitude,
 	                          const FVector& TriangleNormal,
 	                          const FBuoyantMeshSubtriangle& Subtriangle) const;
-	// Adds the hydrostatic forces pressing on PhysX triangle mesh to an array of forces.
-	void GetTriangleMeshForces(TArray<FForce>& InOutForces,
-	                           UWorld& InWorld,
-	                           const PxTriangleMesh& TriangleMesh) const;
+	// Adds the buoyancy and drag forces pressing on PhysX triangle mesh to an array of forces.
+	void GetTriangleMeshForces(TArray<FForce>& InOutForces, UWorld& InWorld, const PxTriangleMesh& TriangleMesh) const;
 
-	// Adds the hydrostatic forces pressing on a static mesh to an array of forces.
-	void GetStaticMeshForces(TArray<FForce>& InOutForces,
-	                         UWorld& InWorld,
-	                         const UBodySetup& BodySetup) const;
+	// Adds the buoyancy and drag forces pressing on a static mesh to an array of forces.
+	void GetStaticMeshForces(TArray<FForce>& InOutForces, UWorld& InWorld, const UBodySetup& BodySetup) const;
 
-	// Applies buoyancy forces to InComponent.
-	void ApplyHydrostaticForce(UWorld& World,
-	                           UPrimitiveComponent& InComponent,
-	                           const FForce& Force);
+	// Applies buoyancy and drag forces to InComponent.
+	void ApplyMeshForce(UWorld& World, UPrimitiveComponent& InComponent, const FForce& Force);
 
-	// Applies all the buoyancy forces to the updated component.
-	void ApplyHydrostaticForces();
+	// Applies all the buoyancy and drag forces to the updated component.
+	void ApplyMeshForces();
 
 	// Gets the height above the water at a determined position.
 	// The wave height is given by the AOceanManager if available, otherwise it
