@@ -6,7 +6,7 @@
 * Unreal Engine version: 4.9
 * Created on: 2015/09/21
 *
-* Last Edited on: 2015/11/06
+* Last Edited on: 2015/11/18
 * Last Edited by: quantumv
 *
 * -------------------------------------------------
@@ -27,12 +27,18 @@ struct BuoyantMeshVertex;
 struct FBuoyantMeshTriangle;
 struct FBuoyantMeshSubtriangle;
 class AOceanManager;
+class UWaterHeightmapComponent;
 
-// For the UE4 Profiler
-DECLARE_STATS_GROUP(TEXT("BuoyantMeshComponent"), STATGROUP_BuoyantMeshComponent, STATCAT_Advanced);
-DECLARE_CYCLE_STAT(TEXT("GetHydrostaticForces"), STAT_GetHydrostaticForces, STATGROUP_BuoyantMeshComponent);
-DECLARE_CYCLE_STAT(TEXT("ApplyMeshForces"), STAT_ApplyHydrostaticForces, STATGROUP_BuoyantMeshComponent);
-DECLARE_CYCLE_STAT(TEXT("GetHeightAboveWater"), STAT_GetHeightAboveWater, STATGROUP_BuoyantMeshComponent);
+struct FTriangleMesh
+{
+	const TArray<FVector> Vertices;
+	const TArray<int32> TriangleVertexIndices;
+
+	FTriangleMesh(const TArray<FVector>& Vertices, const TArray<int32>& TriangleVertexIndices)
+	    : Vertices{Vertices}, TriangleVertexIndices{TriangleVertexIndices}
+	{
+	}
+};
 
 /*
 
@@ -41,11 +47,7 @@ The algorithm used is described in "Water interaction model for boats in video
 games" by Jacques Kerner.
 http://gamasutra.com/view/news/237528/Water_interaction_model_for_boats_in_video_games.php
 
-It does not implement the water heightmap or the rotation-free triangle centers in the appendix.
-
-Use simplified hull-shaped meshes to keep performance acceptable.
-
-Update 2015/11/06: Added support for dynamic (drag) forces.
+In addition, support for dynamic (drag) forces is included.
 
 */
 
@@ -64,134 +66,148 @@ class OCEANPLUGIN_API UBuoyantMeshComponent : public UStaticMeshComponent
 
 	// Only use the vertical component of the buoyancy forces.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Buoyancy Settings")
-	bool bVerticalForcesOnly;
+	bool bVerticalForcesOnly = false;
+
+	// Use a WaterPatchComponent to possibly improve performance.
+	// This actor needs a WaterPatchComponent for this to work.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Buoyancy Settings")
+	bool bUseWaterPatch = true;
 
 	// Use hydrostatic (buoyancy) forces if true.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Buoyancy Settings")
-	bool bUseStaticForces;
+	bool bUseStaticForces = true;
 
 	// Use hydrodynamic (drag) forces if true.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Buoyancy Settings")
-	bool bUseDynamicForces;
-
-	// Density of the fluid in kg/uu^3. It is around 0.001027 if 1 unreal unit is 1 cm.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Buoyancy Settings")
-	float WaterDensity;
+	bool bUseDynamicForces = true;
 
 	// OceanManager used by the component, if unassigned component will auto-detect.
 	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadWrite, Category = "Buoyancy Settings")
-	AOceanManager* OceanManager;
+	AOceanManager* OceanManager = nullptr;
 
 	// Draw arrows representing the buoyancy forces pushing on the mesh?
 	// The length is proportional to the force magnitude.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
-	bool bDrawForceArrows;
+	bool bDrawForceArrows = false;
 
 	// Draw the waterline on the mesh?
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
-	bool bDrawWaterline;
+	bool bDrawWaterline = false;
 
 	// Draw the mesh vertices?
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
-	bool bDrawVertices;
+	bool bDrawVertices = false;
 
 	// Draw the original mesh triangles?
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
-	bool bDrawTriangles;
+	bool bDrawTriangles = false;
 
 	// Draw the submerged triangles?
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
-	bool bDrawSubtriangles;
+	bool bDrawSubtriangles = false;
 
 	// Force arrow size multiplier.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
 	float ForceArrowSize = 1.f;
 
-	enum class ForceType 
-	{
-		Dynamic,
-		Static,
-	};
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mass Settings")
+	bool bOverrideMeshDensity = false;
+
+	// Density of the mesh in kg/uu^3. The object will sink if it's higher than the water density.
+	// Does nothing if bOverrideMeshDensity is false.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mass Settings")
+	float MeshDensity = 0.000800f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mass Settings")
+	bool bOverrideMass = false;
+
+	// Mass of the rigidbody in kg.
+	// Does nothing if bOverrideMass is false.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mass Settings")
+	float Mass = 10000.f;
+
+	// Density of the water in kg/uu^3. It is around 0.001027 if 1 unreal unit is 1 cm.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mass Settings")
+	float WaterDensity = 0.001027f;
 
 	struct FForce
 	{
 		FVector Vector;
 		// Application point of the force
 		FVector Point;
-		// ForceType ForceType;
 		FForce(const FVector& Vector, const FVector& Point) : Vector{Vector}, Point{Point}
 		{
 		}
 	};
 
    protected:
-	// Begin UActorComponent Interface
-
 	virtual void TickComponent(float DeltaTime,
 	                           enum ELevelTick TickType,
 	                           FActorComponentTickFunction* ThisTickFunction) override;
-	virtual void InitializeComponent() override;
-	virtual void BeginPlay() override;
-
-	// End UActorComponent Interface
 
    private:
-	bool bNeedsInitialization = true;
+	bool bHasInitialized = false;
 	void Initialize();
 
-	// Triangles are stored as indices to vertices in the vertex array.
-	// This function gets those indices from the triangles array.
-	static void GetTriangleVertexIndices(const TArray<FVector>& WorldVertexPositions,
-	                                     const void* const VertexIndices,
-	                                     const PxU32 TriangleIndex,
-	                                     const bool b16BitIndices,
-	                                     int32* OutIndex1,
-	                                     int32* OutIndex2,
-	                                     int32* OutIndex3);
+	void SetMassProperties();
 
-	// Triangles are stored as indices to vertices in the vertex array.
-	// This function gets those indices from the triangles array.
-	template <class T>
-	static void GetTriangleVertexIndices(const TArray<FVector>& WorldVertexPositions,
-	                                     const T* const VertexIndices,
-	                                     const PxU32 TriangleIndex,
-	                                     int32* OutIndex1,
-	                                     int32* OutIndex2,
-	                                     int32* OutIndex3);
+	UWorld* World = nullptr;
+	float GravityMagnitude = 0.f;
 
-	// Adds the hydrostatic force pressing on a submerged triangle to an array of forces.
-	void GetSubmergedTriangleForces(const UWorld& World,
-	                          TArray<FForce>& InOutForces,
-	                          const float GravityMagnitude,
-	                          const FVector& TriangleNormal,
-	                          const FBuoyantMeshSubtriangle& Subtriangle) const;
-	// Adds the buoyancy and drag forces pressing on PhysX triangle mesh to an array of forces.
-	void GetTriangleMeshForces(TArray<FForce>& InOutForces, UWorld& InWorld, const PxTriangleMesh& TriangleMesh) const;
+	AOceanManager* FindOceanManager() const;
+	UWaterHeightmapComponent* FindWaterHeightmap() const;
 
-	// Adds the buoyancy and drag forces pressing on a static mesh to an array of forces.
-	void GetStaticMeshForces(TArray<FForce>& InOutForces, UWorld& InWorld, const UBodySetup& BodySetup) const;
+	FForce GetSubmergedTriangleForce(const FBuoyantMeshSubtriangle& Subtriangle, const FVector& TriangleNormal) const;
 
-	// Applies buoyancy and drag forces to InComponent.
-	void ApplyMeshForce(UWorld& World, UPrimitiveComponent& InComponent, const FForce& Force);
-
-	// Applies all the buoyancy and drag forces to the updated component.
 	void ApplyMeshForces();
 
-	// Gets the height above the water at a determined position.
-	// The wave height is given by the AOceanManager if available, otherwise it
-	// is 0.
-	float GetHeightAboveWater(const UWorld& World, const FVector& Position) const;
+	void ApplyMeshForce(const FForce& Force);
 
-	static void DrawDebugTriangle(const UWorld& World,
+	void SetupTickOrder();
+
+	TArray<FTriangleMesh> TriangleMeshes;
+
+	// Attempts to get the height above the water of a point.
+	float GetHeightAboveWater(const FVector& Position) const;
+
+	static void DrawDebugTriangle(UWorld* const World,
 	                              const FVector& A,
 	                              const FVector& B,
 	                              const FVector& C,
 	                              const FColor& Color,
 	                              const float Thickness);
 
-	// Returns the root component as a UPrimitiveComponent, if it is one.
-	UPrimitiveComponent* GetRootPrimitive() const;
-
 	// Returns the parent component as a UPrimitiveComponent, if it is one.
 	UPrimitiveComponent* GetParentPrimitive() const;
+
+	UPROPERTY()
+	UWaterHeightmapComponent* WaterHeightmap = nullptr;
+};
+
+class TMeshUtilities
+{
+   public:
+	static TArray<FTriangleMesh> GetTriangleMeshes(UStaticMeshComponent* StaticMeshComponent);
+
+   private:
+	static TArray<FVector> GetVertices(const PxTriangleMesh* TriangleMesh);
+	static TArray<int32> GetTriangleVertexIndices(const PxTriangleMesh* TriangleMesh);
+};
+
+class TMathUtilities
+{
+   public:
+	// Calculates the volume of a triangle mesh.
+	static float MeshVolume(UStaticMeshComponent* StaticMeshComponent);
+
+   private:
+	/*
+	The signed volume of a triangle in a triangle mesh.
+	The magnitude of this value is the volume of the tetrahedron formed by the triangle and the origin, while the
+	sign of the value is determined by checking the position of the origin with respect to the edge and the direction
+	of the normal.
+	Used in the triangle mesh volume calculation.
+	Reference: http://research.microsoft.com/en-us/um/people/chazhang/publications/icip01_ChaZhang.pdf
+	*/
+	static float SignedVolumeOfTriangle(const FVector& p1, const FVector& p2, const FVector& p3);
 };
